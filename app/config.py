@@ -1,0 +1,14 @@
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ENV_FILE, override=True)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b").strip()
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2").strip()
+TOP_K = int(os.getenv("TOP_K", "3"))
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").strip()
+CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY", "").strip()
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
