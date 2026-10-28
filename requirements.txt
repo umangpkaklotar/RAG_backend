@@ -10,6 +10,7 @@ faiss-cpu
 numpy
 groq
 clerk-backend-api
+pymongo
 
 langchain-text-splitters
 streamlit

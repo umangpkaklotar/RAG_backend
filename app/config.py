@@ -11,4 +11,6 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM
 TOP_K = int(os.getenv("TOP_K", "3"))
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").strip()
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY", "").strip()
+MONGODB_URL = os.getenv("MONGODB_URL", "").strip()
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "").strip()
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}

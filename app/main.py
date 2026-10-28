@@ -18,7 +18,10 @@ from .rag_service import ask_stream, index_files
 @asynccontextmanager
 async def lifespan(_app):
     chat_history.initialize_database()
-    yield
+    try:
+        yield
+    finally:
+        chat_history.close_database()
 
 
 app = FastAPI(title="General Document RAG Chatbot API", version="1.0.0", lifespan=lifespan)
