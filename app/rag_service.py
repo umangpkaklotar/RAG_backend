@@ -10,6 +10,7 @@ from sentence_transformers import SentenceTransformer
 from . import config
 from .file_processing import read_file
 
+_EMBEDDING_BATCH_SIZE = 32
 _embedder = None
 _groq = None
 _client_lock = threading.Lock()
@@ -54,22 +55,21 @@ def _chunks_from_files(file_paths):
     new_chunks = []
     for path, display_name in file_paths:
         try:
-            pages = read_file(path)
+            for location, text in read_file(path):
+                if not text.strip():
+                    continue
+                for chunk_index, piece in enumerate(splitter.split_text(text), 1):
+                    new_chunks.append(
+                        {
+                            "text": piece,
+                            "source": display_name,
+                            "page": location,
+                            "chunk_id": f"{display_name}|{location}|{chunk_index}",
+                            "chunk_index": chunk_index,
+                        }
+                    )
         except Exception as exc:
             raise ValueError(f"Could not extract text from {display_name}: {exc}") from exc
-        for location, text in pages:
-            if not text.strip():
-                continue
-            for chunk_index, piece in enumerate(splitter.split_text(text), 1):
-                new_chunks.append(
-                    {
-                        "text": piece,
-                        "source": display_name,
-                        "page": location,
-                        "chunk_id": f"{display_name}|{location}|{chunk_index}",
-                        "chunk_index": chunk_index,
-                    }
-                )
     if not new_chunks:
         raise ValueError("No readable text found. Scanned PDFs may need OCR.")
     return new_chunks
@@ -81,53 +81,73 @@ class RAGService:
     def __init__(self):
         self._lock = threading.Lock()
         self._update_lock = threading.Lock()
-        self._index = None
+        self._indexes = []
         self._chunks = []
 
-    def replace_chunks(self, chunks):
+    @staticmethod
+    def _build_index(chunks):
         if not chunks:
             raise ValueError("No readable text found. Scanned PDFs may need OCR.")
-        vectors = get_embedder().encode(
-            [chunk["text"] for chunk in chunks],
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
-        vectors = np.asarray(vectors, dtype="float32")
-        index = faiss.IndexFlatIP(vectors.shape[1])
-        index.add(vectors)
+        index = None
+        for start in range(0, len(chunks), _EMBEDDING_BATCH_SIZE):
+            batch = chunks[start : start + _EMBEDDING_BATCH_SIZE]
+            embeddings = get_embedder().encode(
+                [chunk["text"] for chunk in batch],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            vectors = np.asarray(embeddings, dtype="float32")
+            if index is None:
+                index = faiss.IndexFlatIP(vectors.shape[1])
+            index.add(vectors)
+            del batch, embeddings, vectors
+        return index
+
+    def replace_chunks(self, chunks):
+        index = self._build_index(chunks)
         with self._lock:
-            self._index = index
+            self._indexes = [(0, index)]
             self._chunks = list(chunks)
         return {"sections_and_chunks_indexed": len(chunks), "total_vectors": index.ntotal}
 
     def add_files(self, file_paths):
         with self._update_lock:
             new_chunks = _chunks_from_files(file_paths)
+            new_index = self._build_index(new_chunks)
             with self._lock:
-                all_chunks = list(self._chunks) + new_chunks
-            return self.replace_chunks(all_chunks)
+                self._indexes.append((len(self._chunks), new_index))
+                self._chunks.extend(new_chunks)
+                total_vectors = sum(index.ntotal for _, index in self._indexes)
+                return {
+                    "sections_and_chunks_indexed": len(self._chunks),
+                    "total_vectors": total_vectors,
+                }
 
     def retrieve(self, question, top_k=None):
         question = (question or "").strip()
         if not question:
             raise ValueError("Please enter a question.")
         with self._lock:
-            index = self._index
+            indexes = list(self._indexes)
             chunks_snapshot = list(self._chunks)
-        if index is None or index.ntotal == 0:
+        if not indexes:
             raise ValueError("Upload and index at least one document before asking questions.")
         query_vector = get_embedder().encode(
             question, normalize_embeddings=True, show_progress_bar=False
         )
-        result_count = min(top_k or config.TOP_K, index.ntotal)
-        scores, ids = index.search(np.asarray([query_vector], dtype="float32"), result_count)
+        result_count = top_k or config.TOP_K
         hits = []
-        for score, chunk_id in zip(scores[0], ids[0]):
-            if chunk_id >= 0:
-                hit = dict(chunks_snapshot[chunk_id])
-                hit["score"] = float(score)
-                hits.append(hit)
-        return hits
+        query = np.asarray([query_vector], dtype="float32")
+        for offset, index in indexes:
+            scores, ids = index.search(query, min(result_count, index.ntotal))
+            for score, local_id in zip(scores[0], ids[0]):
+                if local_id >= 0:
+                    hits.append((float(score), offset + int(local_id)))
+        hits.sort(key=lambda hit: hit[0], reverse=True)
+        return [
+            {**chunks_snapshot[chunk_id], "score": score}
+            for score, chunk_id in hits[:result_count]
+        ]
 
     def stream_answer(self, question, hits):
         if not hits:

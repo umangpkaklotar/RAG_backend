@@ -12,7 +12,6 @@ from pydantic import BaseModel
 from . import config
 from .auth import get_authenticated_user_id
 from . import chat_history
-from .rag_service import ask_stream, index_files
 
 
 @asynccontextmanager
@@ -87,13 +86,19 @@ async def upload_documents(
             suffix = Path(filename).suffix.lower()
             if suffix not in config.SUPPORTED_EXTENSIONS:
                 raise HTTPException(status_code=400, detail=f"Unsupported file type: {filename}")
-            content = await upload.read()
-            if not content:
-                raise HTTPException(status_code=400, detail=f"Empty file: {filename}")
             temporary = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-            temporary.write(content)
-            temporary.close()
             paths.append((temporary.name, filename))
+            size = 0
+            try:
+                while content := await upload.read(1024 * 1024):
+                    temporary.write(content)
+                    size += len(content)
+            finally:
+                temporary.close()
+            if not size:
+                raise HTTPException(status_code=400, detail=f"Empty file: {filename}")
+        from .rag_service import index_files
+
         result = index_files(paths, user_id=user_id)
         return {"status": "indexed", "files": [name for _, name in paths], **result}
     except HTTPException:
@@ -108,6 +113,8 @@ async def upload_documents(
                 os.remove(path)
             except OSError:
                 pass
+        for upload in files:
+            await upload.close()
 
 
 @app.post("/api/ask")
@@ -122,6 +129,8 @@ def ask(request: AskRequest, user_id: str = Depends(get_authenticated_user_id)):
     def event_stream():
         answer_parts = []
         try:
+            from .rag_service import ask_stream
+
             for event in ask_stream(request.question, user_id=user_id):
                 if event["type"] == "token":
                     answer_parts.append(event["text"])
