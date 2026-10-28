@@ -4,7 +4,6 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import faiss
 import numpy as np
 from groq import Groq
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -139,7 +138,7 @@ def _chunks_from_files(file_paths):
 
 
 class RAGService:
-    """An in-memory, session-scoped FAISS index using the shared model clients."""
+    """An in-memory, session-scoped NumPy vector index using shared API clients."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -151,7 +150,8 @@ class RAGService:
     def _build_index(chunks):
         if not chunks:
             raise ValueError("No readable text found. Scanned PDFs may need OCR.")
-        index = None
+        indexes = []
+        dimension = None
         for start in range(0, len(chunks), _EMBEDDING_BATCH_SIZE):
             batch = chunks[start : start + _EMBEDDING_BATCH_SIZE]
             embeddings = get_embedder().encode(
@@ -160,27 +160,41 @@ class RAGService:
                 show_progress_bar=False,
             )
             vectors = np.asarray(embeddings, dtype="float32")
-            if index is None:
-                index = faiss.IndexFlatIP(vectors.shape[1])
-            index.add(vectors)
-            del batch, embeddings, vectors
-        return index
+            if vectors.ndim != 2 or vectors.shape[0] != len(batch):
+                raise RuntimeError("The embedding API returned an invalid batch.")
+            if dimension is not None and vectors.shape[1] != dimension:
+                raise RuntimeError("The embedding API returned inconsistent dimensions.")
+            dimension = vectors.shape[1]
+            indexes.append(vectors)
+        return indexes
 
     def replace_chunks(self, chunks):
-        index = self._build_index(chunks)
+        indexes = []
+        offset = 0
+        for vectors in self._build_index(chunks):
+            indexes.append((offset, vectors))
+            offset += vectors.shape[0]
         with self._lock:
-            self._indexes = [(0, index)]
+            self._indexes = indexes
             self._chunks = list(chunks)
-        return {"sections_and_chunks_indexed": len(chunks), "total_vectors": index.ntotal}
+        return {"sections_and_chunks_indexed": len(chunks), "total_vectors": offset}
 
     def add_files(self, file_paths):
         with self._update_lock:
             new_chunks = _chunks_from_files(file_paths)
             new_index = self._build_index(new_chunks)
             with self._lock:
-                self._indexes.append((len(self._chunks), new_index))
+                offset = len(self._chunks)
+                if self._indexes and any(
+                    vectors.shape[1] != self._indexes[0][1].shape[1]
+                    for vectors in new_index
+                ):
+                    raise RuntimeError("The embedding API returned inconsistent dimensions.")
+                for vectors in new_index:
+                    self._indexes.append((offset, vectors))
+                    offset += vectors.shape[0]
                 self._chunks.extend(new_chunks)
-                total_vectors = sum(index.ntotal for _, index in self._indexes)
+                total_vectors = sum(vectors.shape[0] for _, vectors in self._indexes)
                 return {
                     "sections_and_chunks_indexed": len(self._chunks),
                     "total_vectors": total_vectors,
@@ -199,13 +213,22 @@ class RAGService:
             question, normalize_embeddings=True, show_progress_bar=False
         )
         result_count = top_k or config.TOP_K
+        if result_count <= 0:
+            return []
         hits = []
-        query = np.asarray([query_vector], dtype="float32")
-        for offset, index in indexes:
-            scores, ids = index.search(query, min(result_count, index.ntotal))
-            for score, local_id in zip(scores[0], ids[0]):
-                if local_id >= 0:
-                    hits.append((float(score), offset + int(local_id)))
+        query = np.asarray(query_vector, dtype="float32")
+        for offset, vectors in indexes:
+            scores = vectors @ query
+            count = min(result_count, scores.shape[0])
+            local_ids = (
+                np.argpartition(scores, -count)[-count:]
+                if count < scores.shape[0]
+                else np.arange(scores.shape[0])
+            )
+            hits.extend(
+                (float(scores[local_id]), offset + int(local_id))
+                for local_id in local_ids
+            )
         hits.sort(key=lambda hit: hit[0], reverse=True)
         return [
             {**chunks_snapshot[chunk_id], "score": score}
