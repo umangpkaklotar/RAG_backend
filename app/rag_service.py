@@ -1,16 +1,19 @@
+import json
 import threading
 import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import faiss
 import numpy as np
 from groq import Groq
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
 
 from . import config
 from .file_processing import read_file
 
 _EMBEDDING_BATCH_SIZE = 32
+_EMBEDDING_TIMEOUT_SECONDS = 30
 _embedder = None
 _groq = None
 _client_lock = threading.Lock()
@@ -21,8 +24,68 @@ def get_embedder():
     global _embedder
     with _client_lock:
         if _embedder is None:
-            _embedder = SentenceTransformer(config.EMBEDDING_MODEL)
+            _embedder = HuggingFaceEmbedder()
     return _embedder
+
+
+class HuggingFaceEmbedder:
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
+        if not config.HF_TOKEN:
+            raise RuntimeError("Set HF_TOKEN to use hosted Hugging Face embeddings.")
+
+        inputs = [texts] if isinstance(texts, str) else list(texts)
+        if not inputs:
+            return np.empty((0, 0), dtype="float32")
+
+        request = Request(
+            f"https://router.huggingface.co/hf-inference/models/{config.EMBEDDING_MODEL}",
+            data=json.dumps({"inputs": inputs}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {config.HF_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=_EMBEDDING_TIMEOUT_SECONDS) as response:
+                result = json.loads(response.read())
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"Hugging Face embedding request failed with HTTP {exc.code}."
+            ) from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError("Could not reach the Hugging Face embedding API.") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Hugging Face returned an invalid embedding response.") from exc
+
+        if (
+            not isinstance(result, list)
+            or (len(result) != len(inputs) and len(inputs) != 1)
+        ):
+            raise RuntimeError("Hugging Face returned an unexpected embedding response.")
+        if len(inputs) == 1 and len(result) != 1:
+            result = [result]
+
+        vectors = []
+        for item in result:
+            vector = np.asarray(item, dtype="float32")
+            if vector.ndim == 2:
+                vector = vector.mean(axis=0)
+            if vector.ndim != 1 or not vector.size or not np.isfinite(vector).all():
+                raise RuntimeError("Hugging Face returned an invalid embedding vector.")
+            if normalize_embeddings:
+                norm = np.linalg.norm(vector)
+                if norm == 0:
+                    raise RuntimeError("Hugging Face returned a zero-length embedding.")
+                vector /= norm
+            vectors.append(vector)
+        try:
+            embeddings = np.stack(vectors)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Hugging Face returned embeddings with inconsistent dimensions."
+            ) from exc
+        return embeddings[0] if isinstance(texts, str) else embeddings
 
 
 def get_groq():
