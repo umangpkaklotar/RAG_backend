@@ -4,7 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
-load_dotenv(ENV_FILE, override=True)
+load_dotenv(ENV_FILE, override=False)
 for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ.setdefault(variable, "1")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()

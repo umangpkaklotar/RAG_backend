@@ -4,7 +4,7 @@ python-multipart
 python-dotenv
 pypdf
 python-docx
-numpy
+numpy<3
 groq
 clerk-backend-api
 httpx
