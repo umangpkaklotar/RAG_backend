@@ -5,6 +5,7 @@ python-dotenv
 pypdf
 python-docx
 numpy<3
+faiss-cpu
 groq
 clerk-backend-api
 httpx

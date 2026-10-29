@@ -114,12 +114,14 @@ async def upload_documents(
                 temporary.close()
             if not size:
                 raise HTTPException(status_code=400, detail=f"Empty file: {filename}")
-        from .rag_service import index_files
+        from .rag_service import EmbeddingAPIError, index_files
 
         result = index_files(paths, user_id=user_id)
         return {"status": "indexed", "files": [name for _, name in paths], **result}
     except HTTPException:
         raise
+    except EmbeddingAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
